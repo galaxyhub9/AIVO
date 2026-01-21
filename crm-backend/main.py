@@ -7,6 +7,9 @@ from langchain_groq import ChatGroq
 from langchain_core.tools import tool
 from typing import Optional
 from langchain_core.messages import SystemMessage
+import datetime
+
+
 
 app = FastAPI()
 
@@ -36,27 +39,32 @@ def log_interaction(
     type: str, 
     date: str, 
     topics: Optional[str] = "None", 
+    materials: Optional[str] = "None",    # <--- Correct Position
     sentiment: Optional[str] = "None", 
-    outcomes: Optional[str] = "None"
+    outcomes: Optional[str] = "None",
+    follow_up: Optional[str] = "None"     # <--- Correct Position
 ):
     """
     Log a NEW interaction. 
-    - ONLY fill fields the user explicitly mentioned. 
-    - If the user didn't mention a field (like topics or outcomes), pass "None".
-    - DO NOT guess values.
+    - materials: brochures, pamphlets, studies.
+    - follow_up: reminders, next steps, emails.
     """
     try:
         db = get_db()
         cursor = db.cursor()
+        
+        # SQL with columns in your exact requested sequence
         sql = """INSERT INTO interactions 
-                 (hcp_name, interaction_type, interaction_date, topics_discussed, sentiment, outcomes) 
-                 VALUES (%s, %s, %s, %s, %s, %s)"""
-        val = (hcp_name, type, date, topics, sentiment, outcomes)
+                 (hcp_name, interaction_type, interaction_date, topics_discussed, 
+                  materials_shared, sentiment, outcomes, follow_up_action) 
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"""
+                 
+        val = (hcp_name, type, date, topics, materials, sentiment, outcomes, follow_up)
         cursor.execute(sql, val)
         db.commit()
-        return "✅ Interaction logged successfully."
+        return "✅ Interaction logged with full details."
     except Exception as e:
-        return f"❌ Error logging interaction: {str(e)}"
+        return f"❌ Error logging: {str(e)}"
 
 @tool
 def search_hcp(name_query: str):
@@ -74,13 +82,13 @@ def edit_interaction(
     type: Optional[str] = None, 
     date: Optional[str] = None, 
     topics: Optional[str] = None, 
+    materials: Optional[str] = None,   # <--- Correct Position
     sentiment: Optional[str] = None, 
-    outcomes: Optional[str] = None
+    outcomes: Optional[str] = None,
+    follow_up: Optional[str] = None    # <--- Correct Position
 ):
     """
-    EDIT or UPDATE the LAST logged interaction.
-    - Use this when the user says "change", "correct", "update", or "it was actually...".
-    - ONLY pass the arguments that need changing. Leave others as None.
+    EDIT the LAST logged interaction.
     """
     try:
         db = get_db()
@@ -89,30 +97,27 @@ def edit_interaction(
         updates = []
         values = []
         
-        # Only add fields that are NOT None
+        # Build the dynamic query
         if hcp_name and hcp_name != "None":
-            updates.append("hcp_name = %s")
-            values.append(hcp_name)
+            updates.append("hcp_name = %s"); values.append(hcp_name)
         if type and type != "None":
-            updates.append("interaction_type = %s")
-            values.append(type)
+            updates.append("interaction_type = %s"); values.append(type)
         if date and date != "None":
-            updates.append("interaction_date = %s")
-            values.append(date)
+            updates.append("interaction_date = %s"); values.append(date)
         if topics and topics != "None":
-            updates.append("topics_discussed = %s")
-            values.append(topics)
+            updates.append("topics_discussed = %s"); values.append(topics)
+        if materials and materials != "None":
+            updates.append("materials_shared = %s"); values.append(materials)
         if sentiment and sentiment != "None":
-            updates.append("sentiment = %s")
-            values.append(sentiment)
+            updates.append("sentiment = %s"); values.append(sentiment)
         if outcomes and outcomes != "None":
-            updates.append("outcomes = %s")
-            values.append(outcomes)
+            updates.append("outcomes = %s"); values.append(outcomes)
+        if follow_up and follow_up != "None":
+            updates.append("follow_up_action = %s"); values.append(follow_up)
             
         if not updates:
             return "No changes requested."
 
-        # Update the specific row
         sql = f"UPDATE interactions SET {', '.join(updates)} ORDER BY id DESC LIMIT 1"
         cursor.execute(sql, tuple(values))
         db.commit()
@@ -135,7 +140,7 @@ def check_compliance(text: str):
 
 # --- Agent Setup ---
 # Using llama-3.3-70b-versatile model as required [cite: 16]
-llm = ChatGroq(model="llama-3.3-70b-versatile", groq_api_key="") 
+llm = ChatGroq(model="llama-3.3-70b-versatile", groq_api_key="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") 
 
 # List of tools the agent can use
 tools = [log_interaction, search_hcp, edit_interaction, check_compliance]
@@ -143,17 +148,24 @@ tools = [log_interaction, search_hcp, edit_interaction, check_compliance]
 
 agent_executor = create_react_agent(llm, tools)
 
+today_str = datetime.date.today().strftime("%Y-%m-%d")
+
 # --- Define System Prompt String ---
 SYSTEM_PROMPT = (
-    "You are a precise data entry assistant. Follow these rules STRICTLY:\n"
-    "1. NEW vs EDIT: If the user says 'log this', use 'log_interaction'. "
-    "If the user says 'change', 'update', 'correct', or 'it was actually', use 'edit_interaction'.\n"
-    "2. NO GUESSING: When logging, if the user did not say the interaction type, log it as 'None'. "
-    "If they didn't mention outcomes, log 'None'.\n"
-    "3. DATES: Always convert 'today' to YYYY-MM-DD format.\n"
-    "4. ARGUMENTS: When using 'edit_interaction', ONLY pass the specific field to be changed."
+    f"You are a precise data entry assistant. Today's date is {today_str}.\n"
+    "Follow these rules STRICTLY:\n"
+    "1. KILL SWITCH - NO DUPLICATES:\n"
+    "   - After you successfully call `log_interaction` or `edit_interaction`, you MUST STOP.\n"
+    "   - DO NOT call the tool again. DO NOT ask 'Is there anything else?'.\n"
+    "   - Just output a final confirmation message like: 'Done. Interaction logged.'\n"
+    "2. TOOL USAGE:\n"
+    "   - Use `log_interaction` for NEW meetings.\n"
+    "   - Use `edit_interaction` for CHANGES.\n"
+    "3. DATA MAPPING:\n"
+    "   - Materials: brochures, pamphlets, studies.\n"
+    "   - Follow Up: reminders, next steps.\n"
+    "4. MISSING DATA: Pass the string 'None' (not null) for any missing field."
 )
-
 # --- API Endpoint ---
 class ChatRequest(BaseModel):
     message: str
@@ -166,16 +178,28 @@ async def chat_endpoint(req: ChatRequest):
         ("user", req.message)
     ]
     
+ # ... inside chat_endpoint ...
     result = agent_executor.invoke({"messages": messages})
     last_message = result["messages"][-1].content
     
+    # --- DEBUG PRINT ---
+    print("DEBUG - Full Result:", result["messages"]) 
+    
     # Extract Tool Data (to update UI)
     extracted_data = None
+    
+    # Loop through messages
     for msg in result["messages"]:
         if hasattr(msg, 'tool_calls') and msg.tool_calls:
             for tool in msg.tool_calls:
                 if tool['name'] in ['log_interaction', 'edit_interaction']:
                     extracted_data = tool['args']
+                    # BREAK 1: Found a tool? Stop looking at other tools in this message.
+                    break 
+        
+        # BREAK 2: Found data? Stop looking at future messages (Ignore hallucinations).
+        if extracted_data:
+            break
 
     return {
         "response": last_message, 
